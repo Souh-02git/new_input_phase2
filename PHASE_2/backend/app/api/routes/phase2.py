@@ -125,6 +125,23 @@ async def get_dependencies(session_id: str = Query(..., description="Session ID"
             if not blocker.actual_resolution_date:  # Active blocker
                 blocked_items.update(blocker.impacted_item_ids)
         
+        # Build detailed critical path payload
+        work_items_by_id = {wi.item_id: wi for wi in project_state.work_items}
+        critical_path_details = []
+        for item_id in cp_result.critical_path:
+            work_item = work_items_by_id.get(item_id)
+            if work_item is None:
+                raise ValueError(
+                    f"Critical path item '{item_id}' exists in DAG but was not found in project work items."
+                )
+            critical_path_details.append({
+                "item_id": item_id,
+                "name": work_item.title,
+                "effort_hours": work_item.current_estimate_hrs,
+                "float_hours": cp_result.item_slack_map.get(item_id, 0.0),
+                "sprint_id": work_item.assigned_sprint,
+            })
+
         # Build response
         response = DependenciesResponse(
             session_id=session_id,
@@ -134,12 +151,15 @@ async def get_dependencies(session_id: str = Query(..., description="Session ID"
             has_cycles=dag.has_cycles,
             critical_path=cp_result.critical_path,
             critical_path_items=cp_result.critical_path_items,
+            critical_path_details=critical_path_details,
             critical_path_duration_hours=cp_result.critical_path_duration_hours,
             critical_path_duration_hours_original=cp_result.critical_path_duration_hours_original,
             critical_path_growth_hours=cp_result.critical_path_growth_hours,
             critical_path_growth_percent=cp_result.critical_path_growth_percent,
             critical_path_duration_days=cp_result.critical_path_duration_days,
             critical_path_item_count=len(cp_result.critical_path),
+            total_work_items=len(project_state.work_items),
+            total_float_hours=sum(cp_result.item_slack_map.values()),
             high_risk_items=risk_scores.high_risk_items,
             medium_risk_items=risk_scores.medium_risk_items,
             low_risk_items=risk_scores.low_risk_items,

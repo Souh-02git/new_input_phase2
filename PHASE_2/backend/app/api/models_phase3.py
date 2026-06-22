@@ -419,6 +419,7 @@ class RecommendationSimulationResponse(BaseModel):
 class ScopeChangeResponse(BaseModel):
     session_id: str = Field(..., description="Session ID")
     project_name: str = Field(..., description="Project name")
+    dry_run: bool = Field(False, description="Whether this was a preview (dry_run=true) or actual change (dry_run=false)")
     descoped_item_ids: List[str] = Field(default_factory=list, description="Work items removed from scope")
     changed_item_count: int = Field(..., ge=0, description="Number of work items updated")
     updated_remaining_effort_hours: float = Field(..., ge=0.0, description="Remaining effort after scope change")

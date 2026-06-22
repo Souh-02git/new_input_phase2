@@ -71,6 +71,7 @@ class Settings(BaseSettings):
 
     # ─── Demo Mode ───────────────────────────────────────────────────────────
     demo_workbook_path: str = "/workspaces/HACKATHON_DEMO_REFINE/reference/TIO2_Sprint_Intelligence_VALIDATED.xlsx"
+    frontend_origin: str | None = None
 
     class Config:
         env_file = ".env"

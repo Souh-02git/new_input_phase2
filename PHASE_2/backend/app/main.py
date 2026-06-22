@@ -32,10 +32,11 @@ def create_app() -> FastAPI:
     
     # ─── Middleware ──────────────────────────────────────────────────────────
     
+    allowed_origins = [settings.frontend_origin] if getattr(settings, 'frontend_origin', None) else []
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Restrict to frontend URL in production
-        allow_credentials=True,
+        allow_origins=allowed_origins,
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )

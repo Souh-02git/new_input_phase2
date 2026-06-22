@@ -46,6 +46,15 @@ class MetricsResponse(BaseModel):
     expected_spillover_items: int
 
 
+class CriticalPathItem(BaseModel):
+    """Detailed information for a work item on the critical path."""
+    item_id: str
+    name: str
+    effort_hours: float
+    float_hours: float
+    sprint_id: str
+
+
 class DependenciesResponse(BaseModel):
     """Response for GET /dependencies endpoint."""
     session_id: str
@@ -59,12 +68,15 @@ class DependenciesResponse(BaseModel):
     # Critical path
     critical_path: List[str]
     critical_path_items: List[str]
+    critical_path_details: List[CriticalPathItem]
     critical_path_duration_hours: float
     critical_path_duration_hours_original: float
     critical_path_growth_hours: float
     critical_path_growth_percent: float
     critical_path_duration_days: float
     critical_path_item_count: int
+    total_work_items: int
+    total_float_hours: float
     
     # Risk assessment
     high_risk_items: List[str]

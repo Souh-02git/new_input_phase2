@@ -1,6 +1,19 @@
-"""Scope change API routes.
+"""
+Scope Change API Routes
 
 POST /api/scope-change - apply a scope reduction to one or more work items.
+
+CONFIRMATION WORKFLOW (for UI implementation):
+1. User selects items to remove from scope
+2. Call: POST /api/scope-change?session_id=X&dry_run=true&item_ids=[...]
+   → Returns: ScopeChangeResponse with dry_run=true (NO session mutation)
+   → UI shows preview: new forecast, risk, effort changes
+3. User confirms action
+4. Call: POST /api/scope-change?session_id=X&dry_run=false&item_ids=[...]
+   → Returns: ScopeChangeResponse with dry_run=false (session PERSISTED)
+   → UI shows confirmation: changes applied
+
+This prevents accidental scope reduction without user confirmation.
 """
 
 from fastapi import APIRouter, HTTPException, Query
@@ -25,9 +38,20 @@ router = APIRouter(prefix="/api", tags=["Scope"])
 @router.post("/scope-change")
 async def apply_scope_change(
     session_id: str = Query(..., description="Session ID"),
+    dry_run: bool = Query(False, description="Preview changes without persisting (default: False)"),
     request: ScopeChangeRequest = ..., 
 ):
-    """Apply a scope reduction and return updated forecast/risk analysis."""
+    """
+    Apply a scope reduction and return updated forecast/risk analysis.
+    
+    Args:
+        session_id: Session identifier
+        dry_run: If True, preview changes without persisting to session
+        request: ScopeChangeRequest with item_ids and optional reason
+        
+    Returns:
+        ScopeChangeResponse with updated metrics (no changes if dry_run=True)
+    """
 
     try:
         session = store.get_session(session_id)
@@ -45,9 +69,9 @@ async def apply_scope_change(
         work_item_map = {item.item_id: item for item in project_state.work_items}
         descoped_item_ids = []
 
+        # Validate all items exist before making any changes
         for item_id in request.item_ids:
-            work_item = work_item_map.get(item_id)
-            if not work_item:
+            if item_id not in work_item_map:
                 raise HTTPException(
                     status_code=404,
                     detail=ApiResponse(
@@ -57,16 +81,27 @@ async def apply_scope_change(
                     ).model_dump(),
                 )
 
-            work_item.status = WorkItemStatus.COMPLETED
-            work_item.is_scope_changed = True
-            work_item.scope_change_reason = request.reason or "Scope reduced via API"
-            work_item.remaining_effort_hrs = 0.0
-            work_item.current_estimate_hrs = 0.0
-            work_item.actual_effort_hrs = min(work_item.actual_effort_hrs, work_item.estimated_effort_hrs)
-            work_item.progress_pct = 1.0
-            descoped_item_ids.append(item_id)
+        # For dry_run, clone the project state to avoid mutations
+        if dry_run:
+            from copy import deepcopy
+            project_state = deepcopy(project_state)
+            work_item_map = {item.item_id: item for item in project_state.work_items}
 
-        session.descoped_item_ids.update(descoped_item_ids)
+        for item_id in request.item_ids:
+            work_item = work_item_map.get(item_id)
+            if work_item:
+                work_item.status = WorkItemStatus.COMPLETED
+                work_item.is_scope_changed = True
+                work_item.scope_change_reason = request.reason or "Scope reduced via API"
+                work_item.remaining_effort_hrs = 0.0
+                work_item.current_estimate_hrs = 0.0
+                work_item.actual_effort_hrs = min(work_item.actual_effort_hrs, work_item.estimated_effort_hrs)
+                work_item.progress_pct = 1.0
+                descoped_item_ids.append(item_id)
+
+        # Only persist to session if not dry_run
+        if not dry_run:
+            session.descoped_item_ids.update(descoped_item_ids)
 
         metrics = MetricsEngine(project_state).calculate()
         dag = DependencyGraphEngine(project_state).build_dag()
@@ -95,6 +130,7 @@ async def apply_scope_change(
         response = ScopeChangeResponse(
             session_id=session_id,
             project_name=project_state.project_info.project_name,
+            dry_run=dry_run,
             descoped_item_ids=descoped_item_ids,
             changed_item_count=len(descoped_item_ids),
             updated_remaining_effort_hours=metrics.remaining_effort_hours,
@@ -102,7 +138,12 @@ async def apply_scope_change(
             risk_analysis=risk_result,
         )
 
-        return ApiResponse(success=True, data=response.model_dump(), message="Scope change applied")
+        mode_msg = "(preview)" if dry_run else "(confirmed)"
+        return ApiResponse(
+            success=True,
+            data=response.model_dump(),
+            message=f"Scope change applied {mode_msg}"
+        )
 
     except HTTPException:
         raise
