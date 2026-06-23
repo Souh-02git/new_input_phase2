@@ -317,6 +317,16 @@ class RiskResult(BaseModel):
             "on-time probability can appear contradictory"
         ),
     )
+    blocker_risk_concentration: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Fraction of overall_risk_score attributable to active blocker root cause "
+            "(range 0.0-1.0). Values above 0.60 indicate the score is dominated by a single "
+            "factor. Informational only -- does not change the score."
+        ),
+    )
 
 
 class RiskResponse(BaseModel):

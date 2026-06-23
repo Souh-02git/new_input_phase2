@@ -81,6 +81,7 @@ class RiskEngine:
         # Calculate sub-scores with explanations
         schedule_risk_exp = self._calculate_schedule_risk()
         dependency_risk_exp = self._calculate_dependency_risk()
+        self._blocker_resource_pts = 0.0
         resource_risk_exp = self._calculate_resource_risk()
         scope_risk_exp = self._calculate_scope_risk()
 
@@ -107,11 +108,32 @@ class RiskEngine:
         all_drivers.extend(resource_risk_exp.drivers)
         all_drivers.extend(scope_risk_exp.drivers)
 
-        # Sort by score descending and take top 10
-        top_drivers = sorted(all_drivers, key=lambda d: d.score, reverse=True)[:10]
+        # Sort by score descending and take top 10, ignoring informational zero-score drivers
+        top_drivers = sorted(
+            (d for d in all_drivers if d.score > 0.0),
+            key=lambda d: d.score,
+            reverse=True,
+        )[:10]
 
         # Calculate sprint-level risks
         sprint_risks = self._calculate_sprint_risks()
+
+        blocker_velocity_impact = float(
+            getattr(self.metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0
+        )
+        blocker_schedule_attribution = (
+            1.0 if blocker_velocity_impact > 0.10 else blocker_velocity_impact / 0.10
+        )
+        blocker_schedule_pts = (
+            self.weights["schedule"] * schedule_score * blocker_schedule_attribution
+        )
+        blocker_resource_pts = float(getattr(self, "_blocker_resource_pts", 0.0) or 0.0)
+        blocker_risk_concentration = (
+            (blocker_schedule_pts + blocker_resource_pts) / overall_score
+            if overall_score > 0.0
+            else 0.0
+        )
+        blocker_risk_concentration = max(0.0, min(1.0, blocker_risk_concentration))
 
         return RiskResult(
             overall_risk_score=overall_score,
@@ -130,6 +152,7 @@ class RiskEngine:
                 "still showing high on-time probability if schedule variance "
                 "is low. These are complementary signals, not contradictions."
             ),
+            blocker_risk_concentration=blocker_risk_concentration,
         )
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -141,26 +164,39 @@ class RiskEngine:
         Calculate schedule risk based on:
         - On-time probability from Monte Carlo
         - Expected delay days
-        - Predicted spillovers
         - Critical path utilization
         """
         drivers: List[RiskDriver] = []
         reasons: List[str] = []
         risk_components = []
 
-        # 1. On-time probability (inverse relationship)
+        # 1. On-time probability is a confidence modifier on the delay estimate
         on_time_prob = self.monte_carlo.on_time_probability
-        on_time_component = (1.0 - on_time_prob) * 100.0  # Convert to 0-100
-        risk_components.append(on_time_component)
+
+        # 2. Expected delay (deterministic primary signal)
+        delay_days = self.forecast.expected_delay_days
+        delay_component = (
+            min(100.0, (delay_days / 30.0) * 80.0) if delay_days > 0 else 0.0
+        )
+
+        CONFIDENCE_WEIGHT = 0.20
+        confidence_modifier = 1.0 + (1.0 - on_time_prob) * CONFIDENCE_WEIGHT
+        schedule_primary = (
+            min(100.0, delay_component * confidence_modifier)
+            if delay_component > 0
+            else 0.0
+        )
 
         if on_time_prob < 0.25:
             drivers.append(
                 RiskDriver(
                     category="SCHEDULE",
-                    score=95.0,
-                    title="Critical On-Time Probability",
-                    description=f"Only {on_time_prob*100:.1f}% probability of on-time delivery. "
-                    f"Majority of simulations finish late.",
+                    score=min(100.0, schedule_primary),
+                    title="On-Time Probability (Confidence Modifier)",
+                    description=(
+                        f"Monte Carlo on-time probability is {on_time_prob*100:.1f}%. "
+                        f"This modifies the delay estimate, increasing schedule risk when confidence is low."
+                    ),
                     recommendation_hint="Review sprint capacity, identify velocity blockers, "
                     "consider scope reduction or timeline extension.",
                 )
@@ -170,10 +206,12 @@ class RiskEngine:
             drivers.append(
                 RiskDriver(
                     category="SCHEDULE",
-                    score=75.0,
-                    title="Poor On-Time Probability",
-                    description=f"{on_time_prob*100:.1f}% probability of on-time delivery. "
-                    f"High likelihood of missing target date.",
+                    score=min(100.0, schedule_primary),
+                    title="On-Time Probability (Confidence Modifier)",
+                    description=(
+                        f"Monte Carlo on-time probability is {on_time_prob*100:.1f}%. "
+                        f"This signal modifies the delay estimate rather than adding an independent schedule score."
+                    ),
                     recommendation_hint="Accelerate critical path items, reduce dependencies.",
                 )
             )
@@ -182,31 +220,28 @@ class RiskEngine:
             drivers.append(
                 RiskDriver(
                     category="SCHEDULE",
-                    score=50.0,
-                    title="Moderate On-Time Probability",
-                    description=f"{on_time_prob*100:.1f}% probability of on-time delivery. "
-                    f"Moderate schedule risk.",
+                    score=min(100.0, schedule_primary),
+                    title="On-Time Probability (Confidence Modifier)",
+                    description=(
+                        f"Monte Carlo on-time probability is {on_time_prob*100:.1f}%. "
+                        f"This is used to modulate the current delay estimate rather than being a separate risk measure."
+                    ),
                     recommendation_hint="Monitor critical path closely, prepare contingency plans.",
                 )
             )
             reasons.append(f"On-time probability {on_time_prob*100:.1f}%")
 
-        # 2. Expected delay (absolute value)
-        delay_days = self.forecast.expected_delay_days
         if delay_days > 0:
-            # Normalize delay to 0-100 scale (use sigmoid-like function)
-            # 30 days delay = ~80 risk, 60 days = ~95 risk
-            delay_risk = min(100.0, (delay_days / 30.0) * 80.0)
-            risk_components.append(delay_risk)
-
             if delay_days > 30:
                 drivers.append(
                     RiskDriver(
                         category="SCHEDULE",
-                        score=min(100.0, delay_risk),
+                        score=min(100.0, schedule_primary),
                         title="High Expected Delay",
-                        description=f"Expected delay of {delay_days:.1f} days beyond target end date. "
-                        f"Current velocity insufficient to meet committed date.",
+                        description=(
+                            f"Expected delay of {delay_days:.1f} days beyond target end date. "
+                            f"Current velocity insufficient to meet committed date."
+                        ),
                         recommendation_hint="Increase sprint velocity, reduce scope, or negotiate timeline.",
                     )
                 )
@@ -215,47 +250,37 @@ class RiskEngine:
                 drivers.append(
                     RiskDriver(
                         category="SCHEDULE",
-                        score=delay_risk,
+                        score=min(100.0, schedule_primary),
                         title="Moderate Expected Delay",
-                        description=f"Expected delay of {delay_days:.1f} days. "
-                        f"At current pace, project will miss target.",
+                        description=(
+                            f"Expected delay of {delay_days:.1f} days. "
+                            f"At current pace, project will miss target."
+                        ),
                         recommendation_hint="Accelerate delivery of critical path items.",
                     )
                 )
                 reasons.append(f"Expected delay {delay_days:.1f} days")
 
-        # 3. Predicted spillovers
-        total_spillovers = sum(self.spillover.predicted_spillover_by_sprint.values())
-        if total_spillovers > 0:
-            # Each spillover item adds roughly 20 hours / 2.5 = 8% risk (assuming 20h avg)
-            spillover_risk = min(100.0, total_spillovers * 8.0)
-            risk_components.append(spillover_risk)
-
-            if total_spillovers >= 10:
-                drivers.append(
-                    RiskDriver(
-                        category="SCHEDULE",
-                        score=min(100.0, spillover_risk),
-                        title="High Spillover Prediction",
-                        description=f"{int(total_spillovers)} work items predicted to carry over. "
-                        f"This will push schedule into future sprints.",
-                        recommendation_hint="Improve estimation accuracy, increase sprint capacity.",
-                    )
+        # Optional informational spillover driver for explainability only
+        if self.forecast.spillover_delay_days > 5.0:
+            drivers.append(
+                RiskDriver(
+                    category="SCHEDULE",
+                    score=0.0,
+                    title="Spillover Schedule Impact",
+                    description=(
+                        f"Predicted spillover is contributing approximately "
+                        f"{self.forecast.spillover_delay_days:.1f} days to the forecast delay "
+                        f"(already included in expected delay above)."
+                    ),
+                    recommendation_hint="Monitor spillover impact in the forecast and adjust sprint scope or capacity accordingly.",
                 )
-                reasons.append(f"{int(total_spillovers)} predicted spillover items")
-            elif total_spillovers >= 5:
-                drivers.append(
-                    RiskDriver(
-                        category="SCHEDULE",
-                        score=spillover_risk,
-                        title="Moderate Spillover Risk",
-                        description=f"{int(total_spillovers)} work items likely to carry over.",
-                        recommendation_hint="Identify high-spillover items early.",
-                    )
-                )
-                reasons.append(f"{int(total_spillovers)} predicted spillover items")
+            )
+            reasons.append(
+                f"Predicted spillover contributes {self.forecast.spillover_delay_days:.1f} days"
+            )
 
-        # 4. Critical path length (duration component)
+        # 3. Critical path length (duration component)
         cp_remaining_days = self.cp_result.critical_path_remaining_hours / 8.0
         target_remaining_days = (
             self.project_state.project_info.target_end_date
@@ -275,7 +300,10 @@ class RiskEngine:
                     )
                 )
 
-        # Average risk components
+        risk_components = []
+        if schedule_primary > 0:
+            risk_components.append(schedule_primary)
+
         if risk_components:
             schedule_score = sum(risk_components) / len(risk_components)
         else:
@@ -488,21 +516,47 @@ class RiskEngine:
                 reasons.append(f"Velocity degrading {abs(velocity_trend)*100:.1f}%")
 
         # 3. Active blockers impact
+        self._blocker_resource_pts = 0.0
         active_blockers = self.metrics.active_blocker_count
+        blocker_velocity_impact = float(
+            getattr(self.metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0
+        )
+        VELOCITY_FLOOR_THRESHOLD = 0.75
+
         if active_blockers > 5:
-            blocker_risk = min(100.0, (active_blockers - 5) * 12.0 + 50.0)
-            risk_components.append(blocker_risk)
-            drivers.append(
-                RiskDriver(
-                    category="RESOURCE",
-                    score=min(100.0, blocker_risk),
-                    title="High Active Blocker Count",
-                    description=f"{active_blockers} active blockers reducing team productivity. "
-                    f"Team resources diverted to resolution.",
-                    recommendation_hint="Escalate blocker resolution, add dedicated resources.",
+            if blocker_velocity_impact >= VELOCITY_FLOOR_THRESHOLD:
+                drivers.append(
+                    RiskDriver(
+                        category="RESOURCE",
+                        score=0.0,
+                        title="Active Blockers (Captured in Schedule Risk)",
+                        description=(
+                            f"{active_blockers} active blockers noted. "
+                            f"Velocity impact ({blocker_velocity_impact:.2f}) is already "
+                            f"fully reflected in Schedule risk. No additional Resource score "
+                            f"added to avoid double-counting."
+                        ),
+                        recommendation_hint="Resolve blockers to improve both schedule and resource risk.",
+                    )
                 )
-            )
-            reasons.append(f"{active_blockers} active blockers")
+            else:
+                blocker_risk = min(100.0, (active_blockers - 5) * 12.0 + 50.0)
+                risk_components.append(blocker_risk)
+                self._blocker_resource_pts = min(100.0, blocker_risk)
+                drivers.append(
+                    RiskDriver(
+                        category="RESOURCE",
+                        score=min(100.0, blocker_risk),
+                        title="High Active Blocker Count (Resource Capacity Risk)",
+                        description=(
+                            f"{active_blockers} active blockers diverting team capacity. "
+                            f"Velocity impact ({blocker_velocity_impact:.2f}) has not saturated "
+                            f"the forecast floor, so this represents additional resource risk."
+                        ),
+                        recommendation_hint="Escalate blocker resolution, add dedicated resources.",
+                    )
+                )
+                reasons.append(f"{active_blockers} active blockers")
 
         # 4. Resource allocation imbalance
         allocation_variance = self._calculate_allocation_imbalance()
@@ -777,7 +831,7 @@ class RiskEngine:
             components.append((dep_count - 5) * 8.0)
 
         if components:
-            return sum(components) / len(components)
+            return min(100.0, sum(components) / len(components))
         return 0.0
 
     # ──────────────────────────────────────────────────────────────────────────

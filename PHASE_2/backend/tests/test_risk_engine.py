@@ -14,7 +14,7 @@ from app.domain.models import (
 from app.engines.metrics_engine import MetricsEngine
 from app.engines.dependency_engine import DependencyGraphEngine
 from app.engines.critical_path_engine import CriticalPathEngine
-from app.engines.spillover_engine import SpilloverAnalysisEngine
+from app.engines.spillover_engine import SpilloverAnalysis, SpilloverAnalysisEngine
 from app.engines.forecast_engine import ForecastEngine
 from app.engines.monte_carlo_engine import MonteCarloEngine
 from app.engines.impact_scoring_engine import ImpactScoringEngine
@@ -451,7 +451,503 @@ def test_schedule_risk_high_when_probability_low():
     assert result.schedule_risk.score > 50.0
 
 
-def test_dependency_risk_increases_with_critical_path():
+def test_schedule_risk_spillover_not_triple_weighted():
+    """Ensure schedule risk only uses spillover through forecast and Monte Carlo."""
+    start_date = datetime(2025, 1, 1)
+    end_date = start_date + timedelta(days=21)
+    project_info = ProjectInfo(
+        project_name="Spillover Pressure",
+        sponsor="Test Sponsor",
+        business_unit="Engineering",
+        project_manager="Test PM",
+        customer="Test Customer",
+        status="Active",
+        start_date=start_date,
+        target_end_date=end_date,
+        sprint_duration_days=14,
+        methodology="Agile Scrum",
+    )
+
+    team = [
+        Resource(
+            resource_id="R1",
+            name="Alice",
+            role="Engineer",
+            primary_skill="Python",
+            secondary_skill="C++",
+            skill_level=SkillLevel.SENIOR,
+            allocation_pct=0.95,
+            availability_pct=0.95,
+        ),
+    ]
+
+    sprints = [
+        Sprint(
+            sprint_id="S1",
+            sprint_name="Sprint 1",
+            sprint_number=1,
+            start_date=start_date,
+            end_date=start_date + timedelta(days=14),
+            working_days=10,
+            sprint_goal="Development",
+            status=SprintStatus.IN_PROGRESS,
+            planned_velocity_hrs=80.0,
+            carryover_count=0,
+        ),
+    ]
+
+    work_items = [
+        WorkItem(
+            item_id="WI-001",
+            title="Large Task",
+            work_type=WorkItemType.FEATURE,
+            assigned_sprint="S1",
+            original_sprint="S1",
+            priority=Priority.HIGH,
+            status=WorkItemStatus.IN_PROGRESS,
+            estimated_effort_hrs=120.0,
+            current_estimate_hrs=120.0,
+            remaining_effort_hrs=120.0,
+            assigned_resource="R1",
+            required_skill="Python",
+        ),
+    ]
+
+    project_state = ProjectState(
+        project_id="proj-spillover-score",
+        project_info=project_info,
+        team=team,
+        sprints=sprints,
+        work_items=work_items,
+        dependencies=[],
+        blockers=[],
+        actuals=[
+            SprintActual(
+                sprint_id="S1",
+                sprint_number=1,
+                planned_effort_hrs=80.0,
+                actual_effort_hrs=70.0,
+                tasks_planned=1,
+                tasks_completed=0,
+                carryover_count=0,
+            )
+        ],
+    )
+
+    metrics = MetricsEngine(project_state).calculate()
+    dep_engine = DependencyGraphEngine(project_state)
+    dag = dep_engine.build_dag()
+    cp_result = CriticalPathEngine(project_state, dag).analyze()
+
+    high_spill = SpilloverAnalysis(
+        spillover_probability={},
+        predicted_spillover_by_sprint={1: 12.0},
+        spillover_confidence_intervals={1: (0.0, 0.0)},
+        high_spillover_risk_items=[],
+        historical_carryover_rate=0.0,
+        historical_carryover_std_dev=0.0,
+        sprint_utilization_pct={1: 1.0},
+    )
+
+    no_spill = SpilloverAnalysis(
+        spillover_probability={},
+        predicted_spillover_by_sprint={1: 0.0},
+        spillover_confidence_intervals={1: (0.0, 0.0)},
+        high_spillover_risk_items=[],
+        historical_carryover_rate=0.0,
+        historical_carryover_std_dev=0.0,
+        sprint_utilization_pct={1: 1.0},
+    )
+
+    forecast_high = ForecastEngine(project_state, metrics, cp_result, high_spill).calculate()
+    forecast_low = ForecastEngine(project_state, metrics, cp_result, no_spill).calculate()
+
+    monte_carlo_high = MonteCarloEngine(
+        project_state,
+        metrics,
+        cp_result,
+        high_spill,
+        simulation_count=1000,
+        seed=123,
+    ).calculate()
+    monte_carlo_low = MonteCarloEngine(
+        project_state,
+        metrics,
+        cp_result,
+        no_spill,
+        simulation_count=1000,
+        seed=123,
+    ).calculate()
+
+    impact_scores = ImpactScoringEngine(project_state, dag).score()
+
+    risk_high = RiskEngine(
+        project_state,
+        metrics,
+        cp_result,
+        dag,
+        high_spill,
+        forecast_high,
+        monte_carlo_high,
+        impact_scores,
+    ).analyze()
+    risk_low = RiskEngine(
+        project_state,
+        metrics,
+        cp_result,
+        dag,
+        no_spill,
+        forecast_low,
+        monte_carlo_low,
+        impact_scores,
+    ).analyze()
+
+    assert forecast_high.spillover_delay_days > 5.0
+    assert all(
+        d.title not in {"High Spillover Prediction", "Moderate Spillover Risk"}
+        for d in risk_high.schedule_risk.drivers
+    )
+    assert all(
+        d.title not in {"High Spillover Prediction", "Moderate Spillover Risk"}
+        for d in risk_low.schedule_risk.drivers
+    )
+
+    def expected_schedule_score(forecast, mc):
+        delay_days = forecast.expected_delay_days
+        delay_component = (
+            min(100.0, (delay_days / 30.0) * 80.0) if delay_days > 0 else 0.0
+        )
+        confidence_modifier = 1.0 + (1.0 - mc.on_time_probability) * 0.20
+        return (
+            min(100.0, delay_component * confidence_modifier)
+            if delay_component > 0
+            else 0.0
+        )
+
+    assert abs(risk_high.schedule_risk.score - expected_schedule_score(forecast_high, monte_carlo_high)) < 0.01
+    assert abs(risk_low.schedule_risk.score - expected_schedule_score(forecast_low, monte_carlo_low)) < 0.01
+    assert risk_high.schedule_risk.score > risk_low.schedule_risk.score
+
+
+def test_spillover_driver_appears_as_informational_not_scored():
+    """Verify schedule risk reports spillover impact as informational only."""
+    start_date = datetime(2025, 1, 1)
+    end_date = datetime(2025, 3, 1)
+    project_info = ProjectInfo(
+        project_name="Spillover Explanation",
+        sponsor="Test Sponsor",
+        business_unit="Engineering",
+        project_manager="Test PM",
+        customer="Test Customer",
+        status="Active",
+        start_date=start_date,
+        target_end_date=end_date,
+        sprint_duration_days=14,
+        methodology="Agile Scrum",
+    )
+
+    team = [
+        Resource(
+            resource_id="R1",
+            name="Alice",
+            role="Engineer",
+            primary_skill="Python",
+            secondary_skill="C++",
+            skill_level=SkillLevel.SENIOR,
+            allocation_pct=0.98,
+            availability_pct=1.0,
+        ),
+        Resource(
+            resource_id="R2",
+            name="Bob",
+            role="Engineer",
+            primary_skill="Python",
+            secondary_skill="JavaScript",
+            skill_level=SkillLevel.SENIOR,
+            allocation_pct=0.96,
+            availability_pct=1.0,
+        ),
+    ]
+
+    sprints = [
+        Sprint(
+            sprint_id="S1",
+            sprint_name="Sprint 1",
+            sprint_number=1,
+            start_date=start_date,
+            end_date=start_date + timedelta(days=14),
+            working_days=10,
+            sprint_goal="Development",
+            status=SprintStatus.IN_PROGRESS,
+            planned_velocity_hrs=120.0,
+            carryover_count=0,
+        ),
+    ]
+
+    work_items = [
+        WorkItem(
+            item_id=f"WI-{i:03d}",
+            title=f"Task {i}",
+            work_type=WorkItemType.TASK,
+            assigned_sprint="S1",
+            original_sprint="S1",
+            priority=Priority.HIGH,
+            status=(WorkItemStatus.NOT_STARTED if i <= 6 else WorkItemStatus.IN_PROGRESS),
+            estimated_effort_hrs=10.0,
+            current_estimate_hrs=15.0 if i <= 4 else 10.0,
+            remaining_effort_hrs=15.0 if i <= 4 else 10.0,
+            assigned_resource="R1",
+            required_skill="Python",
+        )
+        for i in range(1, 13)
+    ]
+
+    dependencies = [
+        Dependency(
+            dependency_id=f"DEP-{i:03d}",
+            predecessor_item_id=f"WI-{i:03d}",
+            successor_item_id=f"WI-{i+1:03d}",
+            lag_days=0,
+            dependency_type=DependencyType.FINISH_TO_START,
+        )
+        for i in range(1, 12)
+    ]
+
+    blockers = [
+        Blocker(
+            blocker_id=f"B{i}",
+            related_item_id=f"WI-00{i}",
+            impacted_item_ids=[f"WI-00{i}"],
+            description="Test blocker",
+            severity=BlockerSeverity.MEDIUM,
+            status=BlockerStatus.OPEN,
+            owner="DevOps",
+            raised_date=start_date,
+            target_resolution_date=start_date + timedelta(days=3),
+            actual_resolution_date=None,
+            category=BlockerCategory.OTHER,
+            notes="Test blocker",
+        )
+        for i in range(1, 7)
+    ]
+
+    actuals = [
+        SprintActual(
+            sprint_id="S1",
+            sprint_number=1,
+            planned_effort_hrs=120.0,
+            actual_effort_hrs=80.0,
+            tasks_planned=12,
+            tasks_completed=6,
+            carryover_count=4,
+        )
+    ]
+
+    project_state = ProjectState(
+        project_id="proj-spillover-info",
+        project_info=project_info,
+        team=team,
+        sprints=sprints,
+        work_items=work_items,
+        dependencies=dependencies,
+        blockers=blockers,
+        actuals=actuals,
+    )
+
+    metrics = MetricsEngine(project_state).calculate()
+    dep_engine = DependencyGraphEngine(project_state)
+    dag = dep_engine.build_dag()
+    cp_result = CriticalPathEngine(project_state, dag).analyze()
+
+    spillover = SpilloverAnalysis(
+        spillover_probability={},
+        predicted_spillover_by_sprint={1: 10.0},
+        spillover_confidence_intervals={1: (0.0, 0.0)},
+        high_spillover_risk_items=[],
+        historical_carryover_rate=4.0,
+        historical_carryover_std_dev=1.0,
+        sprint_utilization_pct={1: 1.0},
+    )
+
+    forecast = ForecastEngine(project_state, metrics, cp_result, spillover).calculate()
+    monte_carlo = MonteCarloEngine(
+        project_state,
+        metrics,
+        cp_result,
+        spillover,
+        simulation_count=1000,
+        seed=456,
+    ).calculate()
+    impact_scores = ImpactScoringEngine(project_state, dag).score()
+
+    risk_result = RiskEngine(
+        project_state,
+        metrics,
+        cp_result,
+        dag,
+        spillover,
+        forecast,
+        monte_carlo,
+        impact_scores,
+    ).analyze()
+
+    spillover_drivers = [
+        d for d in risk_result.schedule_risk.drivers
+        if d.title == "Spillover Schedule Impact"
+    ]
+    assert len(spillover_drivers) == 1
+    assert spillover_drivers[0].score == 0.0
+    assert all(
+        d.title != "Spillover Schedule Impact"
+        for d in risk_result.top_risk_drivers
+    )
+
+
+def test_scope_risk_still_scores_historical_spillover_independently(sample_project_state_high_risk):
+    """Scope risk should still surface historical spillover carryover."""
+    metrics = MetricsEngine(sample_project_state_high_risk).calculate()
+    dep_engine = DependencyGraphEngine(sample_project_state_high_risk)
+    dag = dep_engine.build_dag()
+    cp_result = CriticalPathEngine(sample_project_state_high_risk, dag).analyze()
+    spillover = SpilloverAnalysisEngine(sample_project_state_high_risk, metrics.average_item_effort).analyze()
+    forecast = ForecastEngine(sample_project_state_high_risk, metrics, cp_result, spillover).calculate()
+    mc_engine = MonteCarloEngine(
+        sample_project_state_high_risk, metrics, cp_result, spillover, simulation_count=1000
+    )
+    monte_carlo = mc_engine.calculate()
+    impact_scores = ImpactScoringEngine(sample_project_state_high_risk, dag).score()
+
+    scope_risk = RiskEngine(
+        sample_project_state_high_risk,
+        metrics,
+        cp_result,
+        dag,
+        spillover,
+        forecast,
+        monte_carlo,
+        impact_scores,
+    )._calculate_scope_risk()
+
+    historical_drivers = [
+        d for d in scope_risk.drivers
+        if d.title in {"High Historical Spillover", "Moderate Spillover Pattern"}
+    ]
+    assert len(historical_drivers) >= 1
+    assert historical_drivers[0].score > 0.0
+
+
+def test_sprint_risk_still_uses_predicted_spillover():
+    """Sprint risks must still reflect predicted spillover count."""
+    start_date = datetime(2025, 1, 1)
+    project_info = ProjectInfo(
+        project_name="Sprint Spillover",
+        sponsor="Test Sponsor",
+        business_unit="Engineering",
+        project_manager="Test PM",
+        customer="Test Customer",
+        status="Active",
+        start_date=start_date,
+        target_end_date=start_date + timedelta(days=28),
+        sprint_duration_days=14,
+        methodology="Agile Scrum",
+    )
+
+    team = [
+        Resource(
+            resource_id="R1",
+            name="Alice",
+            role="Engineer",
+            primary_skill="Python",
+            secondary_skill="C++",
+            skill_level=SkillLevel.SENIOR,
+            allocation_pct=0.8,
+            availability_pct=1.0,
+        ),
+    ]
+
+    sprints = [
+        Sprint(
+            sprint_id="S1",
+            sprint_name="Sprint 1",
+            sprint_number=1,
+            start_date=start_date,
+            end_date=start_date + timedelta(days=14),
+            working_days=10,
+            sprint_goal="Dev",
+            status=SprintStatus.IN_PROGRESS,
+            planned_velocity_hrs=160.0,
+            carryover_count=0,
+        ),
+    ]
+
+    work_items = [
+        WorkItem(
+            item_id="WI-001",
+            title="Task 1",
+            work_type=WorkItemType.TASK,
+            assigned_sprint="S1",
+            original_sprint="S1",
+            priority=Priority.MEDIUM,
+            status=WorkItemStatus.IN_PROGRESS,
+            estimated_effort_hrs=20.0,
+            current_estimate_hrs=20.0,
+            remaining_effort_hrs=10.0,
+            assigned_resource="R1",
+            required_skill="Python",
+        ),
+    ]
+
+    project_state = ProjectState(
+        project_id="proj-sprint-spillover",
+        project_info=project_info,
+        team=team,
+        sprints=sprints,
+        work_items=work_items,
+        dependencies=[],
+        blockers=[],
+        actuals=[],
+    )
+
+    metrics = MetricsEngine(project_state).calculate()
+    dep_engine = DependencyGraphEngine(project_state)
+    dag = dep_engine.build_dag()
+    cp_result = CriticalPathEngine(project_state, dag).analyze()
+    spillover = SpilloverAnalysis(
+        spillover_probability={},
+        predicted_spillover_by_sprint={1: 7.0},
+        spillover_confidence_intervals={1: (0.0, 0.0)},
+        high_spillover_risk_items=[],
+        historical_carryover_rate=0.0,
+        historical_carryover_std_dev=0.0,
+        sprint_utilization_pct={1: 0.2},
+    )
+
+    forecast = ForecastEngine(project_state, metrics, cp_result, spillover).calculate()
+    monte_carlo = MonteCarloEngine(
+        project_state,
+        metrics,
+        cp_result,
+        spillover,
+        simulation_count=1000,
+        seed=789,
+    ).calculate()
+    impact_scores = ImpactScoringEngine(project_state, dag).score()
+
+    risk_engine = RiskEngine(
+        project_state,
+        metrics,
+        cp_result,
+        dag,
+        spillover,
+        forecast,
+        monte_carlo,
+        impact_scores,
+    )
+
+    sprint_risks = risk_engine._calculate_sprint_risks()
+    assert len(sprint_risks) == 1
+    assert sprint_risks[0].spillover_items == 7
+    assert abs(sprint_risks[0].risk_score - 56.0) < 0.01
     """Test dependency risk increases with long critical path."""
     start_date = datetime(2025, 1, 1)
     end_date = datetime(2025, 3, 1)
@@ -895,8 +1391,20 @@ def test_low_risk_project(sample_project_state_low_risk):
     assert result.overall_risk_level in [RiskLevel.LOW, RiskLevel.MODERATE]
 
 
-def test_high_risk_project(sample_project_state_high_risk):
-    """Test high-risk project has high overall score."""
+def test_moderate_risk_project_with_high_utilization(sample_project_state_high_risk):
+    """Test high-utilization project with estimate inflation and small delay.
+    
+    After DC-1 refactor (schedule confidence modifier), on-time-probability no longer
+    independently adds risk. It now multiplies the delay component only.
+    
+    This fixture has:
+    - 3.13 days expected delay (small)
+    - 28% on-time probability (low)
+    - 95% team utilization (high)
+    - 46.7% estimate inflation (high)
+    
+    Result: MODERATE overall risk (29.4) driven by Resource + Scope, not Schedule.
+    """
     metrics = MetricsEngine(sample_project_state_high_risk).calculate()
     dep_engine = DependencyGraphEngine(sample_project_state_high_risk)
     dag = dep_engine.build_dag()
@@ -914,6 +1422,30 @@ def test_high_risk_project(sample_project_state_high_risk):
         sample_project_state_high_risk, metrics, cp_result, dag, spillover, forecast, monte_carlo, impact_scores
     )
     result = risk_engine.analyze()
+
+    print("\n=== MODERATE RISK PROJECT (HIGH UTILIZATION) DEBUG ===")
+    print("Overall Score:", result.overall_risk_score)
+    print("Overall Level:", result.overall_risk_level)
+    print("Expected delay days:", forecast.expected_delay_days)
+    print("On-time probability:", monte_carlo.on_time_probability)
+
+    print("\nSchedule Risk")
+    print(result.schedule_risk)
+
+    print("\nDependency Risk")
+    print(result.dependency_risk)
+
+    print("\nResource Risk")
+    print(result.resource_risk)
+
+    print("\nScope Risk")
+    print(result.scope_risk)
+
+    # Under DC-1, small delay + low probability + high utilization + high scope inflation = MODERATE
+    assert result.overall_risk_level in [
+        RiskLevel.MODERATE,
+        RiskLevel.HIGH,
+    ]
     
-    # High risk project should have HIGH or VERY_HIGH risk level
-    assert result.overall_risk_level in [RiskLevel.HIGH, RiskLevel.VERY_HIGH, RiskLevel.CRITICAL]
+    # Verify resource risk dominates (95% utilization)
+    assert result.resource_risk.score >= 60.0
