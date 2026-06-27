@@ -19,7 +19,7 @@ from app.domain.models import (
     WorkItemStatus,
     WorkItemType,
 )
-from app.engines.recommendations.recommendation_engine_v2 import RecommendationEngineV2
+from app.engines.recommendation_engine.recommendation_engine_v2 import RecommendationEngineV2
 
 
 def make_project_state() -> ProjectState:
@@ -157,13 +157,13 @@ def make_project_state() -> ProjectState:
 def test_recommendation_engine_v2_caches_upstream_once(monkeypatch):
     state = make_project_state()
     calls = []
-    original_run = __import__("app.engines.recommendations.simulation_engine_v2", fromlist=["EngineRunner"]).EngineRunner.run
+    original_run = __import__("app.engines.simulation_engine", fromlist=["EngineRunner"]).EngineRunner.run
 
     def wrapped_run(self, state_arg, simulation_count=1000):
         calls.append(simulation_count)
         return original_run(self, state_arg, simulation_count)
 
-    monkeypatch.setattr("app.engines.recommendations.recommendation_engine_v2.EngineRunner.run", wrapped_run)
+    monkeypatch.setattr("app.engines.recommendation_engine.recommendation_engine_v2.EngineRunner.run", wrapped_run)
 
     engine = RecommendationEngineV2(state, simulation_count=50)
     engine.generate(top_n=5)

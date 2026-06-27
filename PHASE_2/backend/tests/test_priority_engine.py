@@ -1,4 +1,4 @@
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     ConfidenceLevel,
     ImpactEstimate,
     RecommendationAction,
@@ -6,7 +6,7 @@ from app.engines.recommendations.models import (
     ScoringWeights,
     UpstreamEngineOutputs,
 )
-from app.engines.recommendations.priority_engine import PriorityEngine
+from app.engines.recommendation_engine.priority_engine import PriorityEngine
 from tests.test_candidate_generator import build_upstream
 from tests.test_recommendation_engine import make_recommendation_project_state
 

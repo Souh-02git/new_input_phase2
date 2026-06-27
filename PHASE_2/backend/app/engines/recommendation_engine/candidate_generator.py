@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from app.domain.models import ProjectState
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     OpportunitySignal,
     RecommendationAction,
     RecommendationCandidate,

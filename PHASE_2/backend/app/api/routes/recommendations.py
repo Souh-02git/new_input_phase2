@@ -19,8 +19,8 @@ from app.api.models_phase3 import (
     RecommendationType,
 )
 from app.domain.models import ProjectState
-from app.engines.recommendations.models import RecommendationAction, ScoringWeights
-from app.engines.recommendations.recommendation_engine_v2 import RecommendationEngineV2
+from app.engines.recommendation_engine.models import RecommendationAction, ScoringWeights
+from app.engines.recommendation_engine.recommendation_engine_v2 import RecommendationEngineV2
 
 router = APIRouter(prefix="/api", tags=["Phase3.4"])
 

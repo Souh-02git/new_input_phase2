@@ -30,6 +30,8 @@ from app.engines.impact_scoring_engine import ImpactScoringEngine
 from app.engines.risk_engine import RiskEngine
 from app.engines.simulation_engine import SimulationEngine, SimulationAction
 from app.api.models_phase3 import RecommendationType
+from app.engines.recommendation_engine.models import Recommendation, RecommendationAction, ConfidenceLevel
+from app.engines.ai_advisor import AIAdvisor
 
 
 def make_simulation_project_state() -> ProjectState:
@@ -266,3 +268,57 @@ def test_simulation_engine_add_capacity(simulation_engine):
     assert result.recommendations_applied == ["REC-002"]
     assert result.simulated_finish_date <= result.baseline_finish_date
     assert result.days_recovered >= 0
+
+
+def test_simulation_engine_supports_scenario_api(simulation_engine):
+    recommendation = Recommendation(
+        recommendation_id="REC-NEW",
+        title="Resolve blocker",
+        description="Resolve blocker on the critical path",
+        action_type=RecommendationAction.RESOLVE_BLOCKER,
+        priority_score=0.95,
+        confidence=ConfidenceLevel.HIGH,
+        estimated_hours_recovered=10.0,
+        estimated_delay_reduction_days=3.0,
+        estimated_risk_reduction=0.2,
+        affected_item_ids=["WI-02"],
+        affected_resource_ids=["R1"],
+        affected_sprint_ids=["S1"],
+        affected_blocker_ids=["BLK-01"],
+        root_cause_signal_id="SIG-001",
+    )
+
+    scenario = simulation_engine.simulate(recommendation)
+    assert scenario.metadata.selected_recommendations == [recommendation.recommendation_id]
+    assert scenario.forecast_comparison.simulated_finish_date <= scenario.forecast_comparison.baseline_finish_date
+    assert scenario.summary.simulation_success is True
+
+    comparisons = simulation_engine.compare_scenarios([scenario])
+    assert len(comparisons) == 1
+    assert comparisons[0].metadata.scenario_id == scenario.metadata.scenario_id
+
+
+def test_ai_advisor_turns_scenario_results_into_guidance(simulation_engine):
+    recommendation = Recommendation(
+        recommendation_id="REC-NEW",
+        title="Resolve blocker",
+        description="Resolve blocker on the critical path",
+        action_type=RecommendationAction.RESOLVE_BLOCKER,
+        priority_score=0.95,
+        confidence=ConfidenceLevel.HIGH,
+        estimated_hours_recovered=10.0,
+        estimated_delay_reduction_days=3.0,
+        estimated_risk_reduction=0.2,
+        affected_item_ids=["WI-02"],
+        affected_resource_ids=["R1"],
+        affected_sprint_ids=["S1"],
+        affected_blocker_ids=["BLK-01"],
+        root_cause_signal_id="SIG-001",
+    )
+
+    advisor = AIAdvisor(simulation_engine)
+    advice = advisor.advise(recommendation)
+
+    assert advice.recommendation_ids == [recommendation.recommendation_id]
+    assert advice.priority in {"high", "medium", "low"}
+    assert advice.summary

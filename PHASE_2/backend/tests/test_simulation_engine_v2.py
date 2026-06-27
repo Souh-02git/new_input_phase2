@@ -20,12 +20,12 @@ from app.domain.models import (
     WorkItemType,
 )
 from app.engines.metrics_engine import MetricsEngine
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     ConfidenceLevel,
     Recommendation,
     RecommendationAction,
 )
-from app.engines.recommendations.simulation_engine_v2 import (
+from app.engines.simulation_engine import (
     MONTE_CARLO_SEED,
     EngineRunner,
     SimulationEngineV2,

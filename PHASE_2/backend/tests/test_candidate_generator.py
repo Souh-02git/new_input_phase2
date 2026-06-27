@@ -8,9 +8,9 @@ from app.engines.forecast_engine import ForecastEngine
 from app.engines.monte_carlo_engine import MonteCarloEngine
 from app.engines.impact_scoring_engine import ImpactScoringEngine
 from app.engines.risk_engine import RiskEngine
-from app.engines.recommendations.candidate_generator import CandidateGenerator
-from app.engines.recommendations.models import RecommendationAction, UpstreamEngineOutputs
-from app.engines.recommendations.signal_detectors import (
+from app.engines.recommendation_engine.candidate_generator import CandidateGenerator
+from app.engines.recommendation_engine.models import RecommendationAction, UpstreamEngineOutputs
+from app.engines.recommendation_engine.signal_detectors import (
     BlockerDetector,
     CapacityDetector,
     CriticalPathDetector,

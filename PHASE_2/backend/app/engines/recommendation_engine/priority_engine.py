@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     ImpactEstimate,
     Recommendation,
     RecommendationAction,

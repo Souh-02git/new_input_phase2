@@ -317,6 +317,67 @@ def test_risk_engine_initialization(sample_project_state_low_risk):
     assert risk_engine is not None
 
 
+def test_risk_engine_uses_metrics_for_velocity_and_allocation_signals(sample_project_state_high_risk):
+    """RiskEngine should consume velocity and allocation facts from ProjectMetrics."""
+    metrics = MetricsEngine(sample_project_state_high_risk).calculate()
+    metrics.velocity_metrics.velocity_trend_pct = -0.25
+    metrics.resource_metrics.workload_balance_score = 0.55
+    metrics.forecast_input_metrics.utilization_pct = 0.96
+
+    dep_engine = DependencyGraphEngine(sample_project_state_high_risk)
+    dag = dep_engine.build_dag()
+    cp_engine = CriticalPathEngine(sample_project_state_high_risk, dag)
+    cp_result = cp_engine.analyze()
+    spillover = SpilloverAnalysisEngine(sample_project_state_high_risk, metrics.average_item_effort).analyze()
+    forecast = ForecastEngine(sample_project_state_high_risk, metrics, cp_result, spillover).calculate()
+    mc_engine = MonteCarloEngine(
+        sample_project_state_high_risk, metrics, cp_result, spillover, simulation_count=1000
+    )
+    monte_carlo = mc_engine.calculate()
+    impact_scores = ImpactScoringEngine(sample_project_state_high_risk, dag).score()
+
+    risk_engine = RiskEngine(
+        sample_project_state_high_risk, metrics, cp_result, dag, spillover, forecast, monte_carlo, impact_scores
+    )
+    result = risk_engine.analyze()
+
+    driver_titles = {driver.title for driver in result.resource_risk.drivers}
+    assert "Velocity Degradation" in driver_titles
+    assert "Team Allocation Imbalance" in driver_titles
+    assert result.resource_risk.score > 0.0
+
+
+def test_scope_risk_uses_forecast_scope_growth(sample_project_state_low_risk):
+    """Scope risk should use forecast scope-growth facts rather than recomputing inflation from work items."""
+    metrics = MetricsEngine(sample_project_state_low_risk).calculate()
+    metrics.quality_metrics.scope_creep_score = 0.75
+    metrics.planning_metrics.scope_volatility_score = 0.80
+
+    dep_engine = DependencyGraphEngine(sample_project_state_low_risk)
+    dag = dep_engine.build_dag()
+    cp_engine = CriticalPathEngine(sample_project_state_low_risk, dag)
+    cp_result = cp_engine.analyze()
+    spillover = SpilloverAnalysisEngine(sample_project_state_low_risk, metrics.average_item_effort).analyze()
+    forecast = ForecastEngine(sample_project_state_low_risk, metrics, cp_result, spillover).calculate()
+    forecast.scope_growth_percent = 22.5
+    forecast.scope_growth_hours = 30.0
+
+    mc_engine = MonteCarloEngine(
+        sample_project_state_low_risk, metrics, cp_result, spillover, simulation_count=1000
+    )
+    monte_carlo = mc_engine.calculate()
+    impact_scores = ImpactScoringEngine(sample_project_state_low_risk, dag).score()
+
+    risk_engine = RiskEngine(
+        sample_project_state_low_risk, metrics, cp_result, dag, spillover, forecast, monte_carlo, impact_scores
+    )
+    result = risk_engine.analyze()
+
+    driver_titles = {driver.title for driver in result.scope_risk.drivers}
+    assert "Scope Growth Signal" in driver_titles
+    assert result.scope_risk.score > 0.0
+
+
 def test_overall_risk_calculation(sample_project_state_low_risk):
     """Verify weighted aggregation formula."""
     metrics = MetricsEngine(sample_project_state_low_risk).calculate()

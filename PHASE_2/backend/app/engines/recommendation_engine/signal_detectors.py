@@ -12,7 +12,7 @@ from app.engines.metrics_engine import ProjectMetrics
 from app.engines.monte_carlo_engine import MonteCarloResult
 from app.engines.risk_engine import RiskResult
 from app.engines.spillover_engine import SpilloverAnalysis
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     OpportunitySignal,
     SignalCategory,
     SignalEvidence,

@@ -37,15 +37,15 @@ from app.engines.forecast_engine import ForecastEngine
 from app.engines.impact_scoring_engine import ImpactScoringEngine
 from app.engines.risk_engine import RiskEngine
 from app.engines.monte_carlo_engine import MonteCarloEngine
-from app.engines.recommendations.recommendation_engine_v2 import RecommendationEngineV2
-from app.engines.recommendations.signal_detectors import (
+from app.engines.recommendation_engine.recommendation_engine_v2 import RecommendationEngineV2
+from app.engines.recommendation_engine.signal_detectors import (
     BlockerDetector,
     CapacityDetector,
     SprintDetector,
     CriticalPathDetector,
     ScheduleDetector,
 )
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.models import (
     UpstreamEngineOutputs,
     SignalCategory,
     RecommendationAction,

@@ -32,6 +32,35 @@ from app.api.models_phase3 import (
 )
 
 
+RISK_THRESHOLDS = {
+    "schedule_delay_high_days": 30.0,
+    "schedule_delay_moderate_days": 10.0,
+    "schedule_spillover_driver_days": 5.0,
+    "dependency_density_high_ratio": 2.5,
+    "dependency_density_moderate_ratio": 1.5,
+    "critical_path_items_high": 10,
+    "critical_path_items_moderate": 5,
+    "dependency_bottleneck_in_degree": 5,
+    "dependency_cascade_depth_high": 5,
+    "resource_utilization_high": 0.95,
+    "resource_utilization_moderate": 0.85,
+    "velocity_degradation_threshold": -0.10,
+    "assignment_imbalance_threshold": 0.30,
+    "scope_growth_high_pct": 20.0,
+    "scope_growth_moderate_pct": 10.0,
+    "carryover_high": 3.0,
+    "carryover_moderate": 1.5,
+    "blocked_items_high_ratio": 0.15,
+    "not_started_items_high_ratio": 0.40,
+    "blocker_count_high": 5,
+    "blocker_velocity_floor_threshold": 0.75,
+    "sprint_blocked_items_high": 5,
+    "sprint_spillover_items_high": 5,
+    "sprint_dependency_count_high": 10,
+    "sprint_dependency_count_moderate": 5,
+}
+
+
 class RiskEngine:
     """
     Analyzes project risk using outputs from existing engines.
@@ -66,6 +95,7 @@ class RiskEngine:
         self.monte_carlo = monte_carlo
         self.impact_scores = impact_scores
         self.work_items = {wi.item_id: wi for wi in project_state.work_items}
+        self.thresholds = RISK_THRESHOLDS
 
         # Severity mapping and bonus used across dependency/sprint/recommendation logic
         self.SEVERITY_SCORES = {
@@ -263,7 +293,7 @@ class RiskEngine:
             reasons.append(f"On-time probability {on_time_prob*100:.1f}%")
 
         if delay_days > 0:
-            if delay_days > 30:
+            if delay_days > self.thresholds["schedule_delay_high_days"]:
                 drivers.append(
                     RiskDriver(
                         category="SCHEDULE",
@@ -277,7 +307,7 @@ class RiskEngine:
                     )
                 )
                 reasons.append(f"Expected delay {delay_days:.1f} days")
-            elif delay_days > 10:
+            elif delay_days > self.thresholds["schedule_delay_moderate_days"]:
                 drivers.append(
                     RiskDriver(
                         category="SCHEDULE",
@@ -293,7 +323,7 @@ class RiskEngine:
                 reasons.append(f"Expected delay {delay_days:.1f} days")
 
         # Optional informational spillover driver for explainability only
-        if self.forecast.spillover_delay_days > 5.0:
+        if self.forecast.spillover_delay_days > self.thresholds["schedule_spillover_driver_days"]:
             drivers.append(
                 RiskDriver(
                     category="SCHEDULE",
@@ -370,13 +400,14 @@ class RiskEngine:
         risk_components = []
 
         # 1. Total dependency count (normalized)
-        dep_count = self.metrics.dependency_count
+        dependency_metrics = self.metrics.dependency_metrics
+        dep_count = dependency_metrics.dependency_count
         total_items = self.metrics.total_items
         dep_ratio = dep_count / total_items if total_items > 0 else 0.0
 
         # Benchmark: 1.5 deps per item is moderate, 2.5+ is high
-        if dep_ratio > 2.5:
-            dep_risk = min(100.0, (dep_ratio - 2.5) * 40.0 + 60.0)
+        if dep_ratio > self.thresholds["dependency_density_high_ratio"]:
+            dep_risk = min(100.0, (dep_ratio - self.thresholds["dependency_density_high_ratio"]) * 40.0 + 60.0)
             risk_components.append(dep_risk)
             drivers.append(
                 RiskDriver(
@@ -389,8 +420,8 @@ class RiskEngine:
                 )
             )
             reasons.append(f"{dep_count} dependencies ({dep_ratio:.2f} per item)")
-        elif dep_ratio > 1.5:
-            dep_risk = (dep_ratio - 1.5) * 20.0 + 30.0
+        elif dep_ratio > self.thresholds["dependency_density_moderate_ratio"]:
+            dep_risk = (dep_ratio - self.thresholds["dependency_density_moderate_ratio"]) * 20.0 + 30.0
             risk_components.append(dep_risk)
             drivers.append(
                 RiskDriver(
@@ -406,8 +437,8 @@ class RiskEngine:
 
         # 2. Critical path length (number of items on critical path)
         cp_items = len(self.cp_result.items_on_critical_path)
-        if cp_items > 10:
-            cp_risk = min(100.0, (cp_items - 10) * 5.0 + 50.0)
+        if cp_items > self.thresholds["critical_path_items_high"]:
+            cp_risk = min(100.0, (cp_items - self.thresholds["critical_path_items_high"]) * 5.0 + 50.0)
             risk_components.append(cp_risk)
             drivers.append(
                 RiskDriver(
@@ -420,8 +451,8 @@ class RiskEngine:
                 )
             )
             reasons.append(f"{cp_items} items on critical path")
-        elif cp_items > 5:
-            cp_risk = (cp_items - 5) * 10.0
+        elif cp_items > self.thresholds["critical_path_items_moderate"]:
+            cp_risk = (cp_items - self.thresholds["critical_path_items_moderate"]) * 10.0
             risk_components.append(cp_risk)
             drivers.append(
                 RiskDriver(
@@ -436,32 +467,28 @@ class RiskEngine:
             reasons.append(f"{cp_items} items on critical path")
 
         # 3. Bottleneck analysis (high in-degree items)
-        bottlenecks = [
-            item_id
-            for item_id, in_degree in self.dag.in_degree.items()
-            if in_degree >= 5
-        ]
-        if len(bottlenecks) > 0:
-            bottleneck_risk = min(100.0, len(bottlenecks) * 15.0 + 40.0)
+        bottleneck_count = self.metrics.dependency_metrics.dependency_bottleneck_count
+        if bottleneck_count > 0:
+            bottleneck_risk = min(100.0, bottleneck_count * 15.0 + 40.0)
             risk_components.append(bottleneck_risk)
             drivers.append(
                 RiskDriver(
                     category="DEPENDENCY",
                     score=min(100.0, bottleneck_risk),
                     title="Dependency Bottlenecks",
-                    description=f"{len(bottlenecks)} items are bottlenecks "
-                    f"(5+ predecessors each). Blocking these items cascades impact.",
+                    description=f"{bottleneck_count} items are bottlenecks "
+                    f"({self.thresholds['dependency_bottleneck_in_degree']}+ predecessors each). Blocking these items cascades impact.",
                     recommendation_hint="Prioritize bottleneck items, reduce their dependencies.",
                 )
             )
-            reasons.append(f"{len(bottlenecks)} dependency bottlenecks")
+            reasons.append(f"{bottleneck_count} dependency bottlenecks")
 
         # 4. Blocker cascade depth
         cascade_depths = list(self.impact_scores.cascade_depth_map.values())
         if cascade_depths:
             max_cascade_depth = max(cascade_depths)
-            if max_cascade_depth > 5:
-                cascade_risk = min(100.0, (max_cascade_depth - 5) * 15.0 + 60.0)
+            if max_cascade_depth > self.thresholds["dependency_cascade_depth_high"]:
+                cascade_risk = min(100.0, (max_cascade_depth - self.thresholds["dependency_cascade_depth_high"]) * 15.0 + 60.0)
                 risk_components.append(cascade_risk)
                 drivers.append(
                     RiskDriver(
@@ -477,12 +504,15 @@ class RiskEngine:
         # 5. Baseline for any active (unresolved) blocker present
         # This is independent of structural dependency signals and ensures
         # a baseline dependency risk when blockers exist in the project state.
-        active_blockers = [b for b in self.project_state.blockers if not b.actual_resolution_date]
-        if active_blockers:
-            # Severity-weighted baseline using configured mapping
-            highest_sev = max((b.severity for b in active_blockers), key=lambda s: list(self.SEVERITY_SCORES.keys()).index(s))
-            base = self.SEVERITY_SCORES.get(highest_sev, 15.0)
-            extra = self.ADDITIONAL_BLOCKER_BONUS * (len(active_blockers) - 1)
+        active_blockers = self.metrics.blocker_metrics.active_blocker_count
+        if active_blockers > 0:
+            highest_sev = max(
+                (b.severity for b in self.project_state.blockers if not b.actual_resolution_date),
+                key=lambda s: list(self.SEVERITY_SCORES.keys()).index(s),
+                default=None,
+            )
+            base = self.SEVERITY_SCORES.get(highest_sev, 15.0) if highest_sev is not None else 15.0
+            extra = self.ADDITIONAL_BLOCKER_BONUS * (active_blockers - 1)
             baseline_score = min(100.0, base + extra)
             risk_components.append(baseline_score)
             drivers.append(
@@ -491,13 +521,13 @@ class RiskEngine:
                     score=baseline_score,
                     title="Active Blocker Present",
                     description=(
-                        f"{len(active_blockers)} unresolved blocker(s) present. "
+                        f"{active_blockers} unresolved blocker(s) present. "
                         f"Highest severity: {highest_sev.value}. Baseline dependency risk applied."
                     ),
                     recommendation_hint="Resolve active blockers to remove baseline dependency exposure.",
                 )
             )
-            reasons.append(f"{len(active_blockers)} active blocker(s); baseline {baseline_score:.1f}")
+            reasons.append(f"{active_blockers} active blocker(s); baseline {baseline_score:.1f}")
 
         # Average risk components
         if risk_components:
@@ -528,9 +558,12 @@ class RiskEngine:
         risk_components = []
 
         # 1. Team utilization
-        avg_utilization = self.metrics.avg_allocation_pct * self.metrics.avg_availability_pct
-        if avg_utilization > 0.95:
-            util_risk = min(100.0, (avg_utilization - 0.95) * 1000.0 + 80.0)
+        avg_utilization = (
+            self.metrics.resource_metrics.avg_allocation_pct
+            * self.metrics.resource_metrics.avg_availability_pct
+        )
+        if avg_utilization > self.thresholds["resource_utilization_high"]:
+            util_risk = min(100.0, (avg_utilization - self.thresholds["resource_utilization_high"]) * 1000.0 + 80.0)
             risk_components.append(util_risk)
             drivers.append(
                 RiskDriver(
@@ -543,8 +576,8 @@ class RiskEngine:
                 )
             )
             reasons.append(f"Team utilization {avg_utilization*100:.1f}%")
-        elif avg_utilization > 0.85:
-            util_risk = (avg_utilization - 0.85) * 100.0 + 60.0
+        elif avg_utilization > self.thresholds["resource_utilization_moderate"]:
+            util_risk = (avg_utilization - self.thresholds["resource_utilization_moderate"]) * 100.0 + 60.0
             risk_components.append(util_risk)
             drivers.append(
                 RiskDriver(
@@ -561,7 +594,7 @@ class RiskEngine:
         # 2. Velocity degradation
         if self.metrics.actual_avg_velocity > 0:
             velocity_trend = self._calculate_velocity_trend()
-            if velocity_trend < -0.10:  # >10% degradation
+            if velocity_trend < self.thresholds["velocity_degradation_threshold"]:
                 trend_risk = min(100.0, abs(velocity_trend) * 500.0)
                 risk_components.append(trend_risk)
                 drivers.append(
@@ -579,14 +612,17 @@ class RiskEngine:
 
         # 3. Active blockers impact
         self._blocker_resource_pts = 0.0
-        active_blockers = self.metrics.active_blocker_count
+        active_blockers = self.metrics.blocker_metrics.active_blocker_count
         blocker_velocity_impact = float(
             getattr(self.metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0
         )
-        VELOCITY_FLOOR_THRESHOLD = 0.75
+        if blocker_velocity_impact <= 0.0:
+            blocker_velocity_impact = float(
+                getattr(self.metrics.blocker_metrics, "estimated_blocker_velocity_impact", 0.0) or 0.0
+            )
 
-        if active_blockers > 5:
-            if blocker_velocity_impact >= VELOCITY_FLOOR_THRESHOLD:
+        if active_blockers > self.thresholds["blocker_count_high"]:
+            if blocker_velocity_impact >= self.thresholds["blocker_velocity_floor_threshold"]:
                 drivers.append(
                     RiskDriver(
                         category="RESOURCE",
@@ -602,7 +638,7 @@ class RiskEngine:
                     )
                 )
             else:
-                blocker_risk = min(100.0, (active_blockers - 5) * 12.0 + 50.0)
+                blocker_risk = min(100.0, (active_blockers - self.thresholds["blocker_count_high"]) * 12.0 + 50.0)
                 risk_components.append(blocker_risk)
                 self._blocker_resource_pts = min(100.0, blocker_risk)
                 drivers.append(
@@ -622,8 +658,8 @@ class RiskEngine:
 
         # 4. Resource allocation imbalance
         allocation_variance = self._calculate_allocation_imbalance()
-        if allocation_variance > 0.30:
-            imbalance_risk = min(100.0, (allocation_variance - 0.30) * 200.0 + 40.0)
+        if allocation_variance > self.thresholds["assignment_imbalance_threshold"]:
+            imbalance_risk = min(100.0, (allocation_variance - self.thresholds["assignment_imbalance_threshold"]) * 200.0 + 40.0)
             risk_components.append(imbalance_risk)
             drivers.append(
                 RiskDriver(
@@ -654,69 +690,70 @@ class RiskEngine:
 
     def _calculate_scope_risk(self) -> RiskExplanation:
         """
-        Calculate scope risk based on:
-        - Estimate inflation (items with increased estimates)
-        - Scope growth (original vs current)
-        - Spillover carry-over trends
-        - Remaining effort increase
+        Interpret scope-related risk using deterministic forecast and planning metrics.
+
+        The RiskEngine consumes upstream facts for scope growth, planning volatility,
+        and carryover instead of recomputing changes in estimates from the raw state.
         """
         drivers: List[RiskDriver] = []
         reasons: List[str] = []
         risk_components = []
 
-        # 1. Estimate inflation (items with current > original)
-        estimate_increase_count = 0
-        total_estimate_inflation = 0.0
-        for wi in self.project_state.work_items:
-            if wi.current_estimate_hrs > wi.estimated_effort_hrs:
-                estimate_increase_count += 1
-                total_estimate_inflation += (
-                    wi.current_estimate_hrs - wi.estimated_effort_hrs
+        forecast_scope_growth_pct = float(getattr(self.forecast, "scope_growth_percent", 0.0) or 0.0)
+        forecast_scope_growth_hours = float(getattr(self.forecast, "scope_growth_hours", 0.0) or 0.0)
+        if forecast_scope_growth_pct > self.thresholds["scope_growth_high_pct"] or forecast_scope_growth_hours > 0.0:
+            inflation_risk = min(100.0, (forecast_scope_growth_pct - self.thresholds["scope_growth_high_pct"]) * 2.5 + 60.0)
+            risk_components.append(inflation_risk)
+            drivers.append(
+                RiskDriver(
+                    category="SCOPE",
+                    score=min(100.0, inflation_risk),
+                    title="Scope Growth Signal",
+                    description=(
+                        f"Forecast scope growth is {forecast_scope_growth_pct:.1f}% "
+                        f"({forecast_scope_growth_hours:.0f}h), indicating material increase in committed work."
+                    ),
+                    recommendation_hint="Audit inflated scope items, renegotiate commitments, and re-baseline delivery expectations.",
                 )
-
-        if estimate_increase_count > 0:
-            inflation_pct = (
-                (total_estimate_inflation / self.metrics.total_effort_hours * 100.0)
-                if self.metrics.total_effort_hours > 0
-                else 0.0
             )
-            if inflation_pct > 20.0:
-                inflation_risk = min(100.0, (inflation_pct - 20.0) * 2.5 + 60.0)
-                risk_components.append(inflation_risk)
-                drivers.append(
-                    RiskDriver(
-                        category="SCOPE",
-                        score=min(100.0, inflation_risk),
-                        title="Major Estimate Inflation",
-                        description=f"{estimate_increase_count} items show estimate inflation. "
-                        f"Total inflation {inflation_pct:.1f}% ({total_estimate_inflation:.0f}h). "
-                        f"Scope has grown significantly.",
-                        recommendation_hint="Audit inflated items, re-negotiate scope with stakeholders.",
-                    )
+            reasons.append(f"Forecast scope growth {forecast_scope_growth_pct:.1f}%")
+        elif forecast_scope_growth_pct > self.thresholds["scope_growth_moderate_pct"]:
+            inflation_risk = (forecast_scope_growth_pct - self.thresholds["scope_growth_moderate_pct"]) * 2.0 + 40.0
+            risk_components.append(inflation_risk)
+            drivers.append(
+                RiskDriver(
+                    category="SCOPE",
+                    score=min(100.0, inflation_risk),
+                    title="Scope Growth Signal",
+                    description=(
+                        f"Forecast scope growth is {forecast_scope_growth_pct:.1f}% and should be monitored."
+                    ),
+                    recommendation_hint="Review scope growth drivers with the delivery team.",
                 )
-                reasons.append(
-                    f"{estimate_increase_count} items with increased estimates "
-                    f"({inflation_pct:.1f}% inflation)"
-                )
-            elif inflation_pct > 10.0:
-                inflation_risk = (inflation_pct - 10.0) * 2.0 + 40.0
-                risk_components.append(inflation_risk)
-                drivers.append(
-                    RiskDriver(
-                        category="SCOPE",
-                        score=min(100.0, inflation_risk),
-                        title="Moderate Estimate Inflation",
-                        description=f"{estimate_increase_count} items with estimate increases. "
-                        f"Total inflation {inflation_pct:.1f}%.",
-                        recommendation_hint="Review causes of estimate inflation.",
-                    )
-                )
-                reasons.append(f"Estimate inflation {inflation_pct:.1f}%")
+            )
+            reasons.append(f"Forecast scope growth {forecast_scope_growth_pct:.1f}%")
 
-        # 2. Spillover carry-over trend
+        scope_volatility_score = self.metrics.planning_metrics.scope_volatility_score
+        scope_creep_score = self.metrics.quality_metrics.scope_creep_score
+        if scope_volatility_score > 0.7 or scope_creep_score > 0.7:
+            volatility_risk = min(100.0, max(scope_volatility_score, scope_creep_score) * 100.0)
+            risk_components.append(volatility_risk)
+            drivers.append(
+                RiskDriver(
+                    category="SCOPE",
+                    score=min(100.0, volatility_risk),
+                    title="Planning Volatility",
+                    description=(
+                        f"Planning volatility score is {scope_volatility_score:.2f} and scope creep score is {scope_creep_score:.2f}."
+                    ),
+                    recommendation_hint="Re-baseline the backlog and lock scope decisions earlier in the sprint cycle.",
+                )
+            )
+            reasons.append("Planning volatility detected")
+
         historical_carryover = self.spillover.historical_carryover_rate
-        if historical_carryover > 3.0:
-            carryover_risk = min(100.0, (historical_carryover - 3.0) * 20.0 + 50.0)
+        if historical_carryover > self.thresholds["carryover_high"]:
+            carryover_risk = min(100.0, (historical_carryover - self.thresholds["carryover_high"]) * 20.0 + 50.0)
             risk_components.append(carryover_risk)
             drivers.append(
                 RiskDriver(
@@ -728,11 +765,9 @@ class RiskEngine:
                     recommendation_hint="Improve estimation, reduce sprint scope commitment.",
                 )
             )
-            reasons.append(
-                f"Historical carryover {historical_carryover:.1f} items/sprint"
-            )
-        elif historical_carryover > 1.5:
-            carryover_risk = (historical_carryover - 1.5) * 20.0
+            reasons.append(f"Historical carryover {historical_carryover:.1f} items/sprint")
+        elif historical_carryover > self.thresholds["carryover_moderate"]:
+            carryover_risk = (historical_carryover - self.thresholds["carryover_moderate"]) * 20.0
             risk_components.append(carryover_risk)
             drivers.append(
                 RiskDriver(
@@ -745,12 +780,11 @@ class RiskEngine:
             )
             reasons.append(f"Spillover pattern {historical_carryover:.1f} items/sprint")
 
-        # 3. Blocked items (items blocked due to scope issues or dependencies)
-        blocked_items = self.metrics.blocked_items
-        if blocked_items > self.metrics.total_items * 0.15:
+        blocked_items = self.metrics.executive_metrics.blocked_items
+        if blocked_items > self.metrics.total_items * self.thresholds["blocked_items_high_ratio"]:
             blocked_risk = min(
                 100.0,
-                (blocked_items / self.metrics.total_items - 0.15) * 500.0 + 60.0,
+                (blocked_items / self.metrics.total_items - self.thresholds["blocked_items_high_ratio"]) * 500.0 + 60.0,
             )
             risk_components.append(blocked_risk)
             drivers.append(
@@ -764,12 +798,14 @@ class RiskEngine:
                 )
             )
 
-        # 4. Not-started items (potential scope risk)
-        not_started = self.metrics.not_started_items
-        if not_started > self.metrics.total_items * 0.40:
+        not_started = self.metrics.executive_metrics.total_items - self.metrics.executive_metrics.completed_items - self.metrics.executive_metrics.blocked_items
+        if (
+            self.metrics.total_items >= 3
+            and not_started > self.metrics.total_items * self.thresholds["not_started_items_high_ratio"]
+        ):
             not_started_risk = min(
                 100.0,
-                (not_started / self.metrics.total_items - 0.40) * 300.0 + 50.0,
+                (not_started / self.metrics.total_items - self.thresholds["not_started_items_high_ratio"]) * 300.0 + 50.0,
             )
             risk_components.append(not_started_risk)
             drivers.append(
@@ -784,7 +820,6 @@ class RiskEngine:
             )
             reasons.append(f"{not_started} items not started")
 
-        # Average risk components
         if risk_components:
             scope_score = sum(risk_components) / len(risk_components)
         else:
@@ -803,6 +838,7 @@ class RiskEngine:
     def _calculate_sprint_risks(self) -> List[SprintRisk]:
         """Calculate risk for each sprint."""
         sprint_risks = []
+        sprint_metrics_by_number = {s.sprint_number: s for s in self.metrics.sprint_metrics}
 
         for sprint in self.project_state.sprints:
             sprint_id = sprint.sprint_number
@@ -833,7 +869,12 @@ class RiskEngine:
             )
 
             # Sprint utilization
-            sprint_planned_effort = sum(wi.estimated_effort_hrs for wi in sprint_items)
+            sprint_metrics = sprint_metrics_by_number.get(sprint.sprint_number)
+            sprint_planned_effort = (
+                float(sprint_metrics.planned_effort_hours)
+                if sprint_metrics is not None and sprint_metrics.planned_effort_hours > 0
+                else sum(wi.estimated_effort_hrs for wi in sprint_items)
+            )
             sprint_capacity = sprint.planned_velocity_hrs if sprint.planned_velocity_hrs > 0 else 100.0
             sprint_utilization = (
                 (sprint_planned_effort / sprint_capacity)
@@ -887,8 +928,8 @@ class RiskEngine:
             components.append((utilization - 0.9) * 100.0 + 40.0)
 
         # Blocked items component
-        if blocked_count > 5:
-            components.append(min(100.0, (blocked_count - 5) * 10.0 + 50.0))
+        if blocked_count > self.thresholds["sprint_blocked_items_high"]:
+            components.append(min(100.0, (blocked_count - self.thresholds["sprint_blocked_items_high"]) * 10.0 + 50.0))
         elif blocked_count > 0:
             components.append(blocked_count * 10.0)
 
@@ -897,19 +938,19 @@ class RiskEngine:
             components.append(min(100.0, blocker_exposure))
 
         # Spillover component
-        if spillover_count > 5:
+        if spillover_count > self.thresholds["sprint_spillover_items_high"]:
             components.append(min(100.0, spillover_count * 8.0))
         elif spillover_count > 0:
             components.append(spillover_count * 10.0)
 
         # Dependency component
-        if dep_count > 10:
-            components.append(min(100.0, (dep_count - 10) * 5.0 + 50.0))
-        elif dep_count > 5:
-            components.append((dep_count - 5) * 8.0)
+        if dep_count > self.thresholds["sprint_dependency_count_high"]:
+            components.append(min(100.0, (dep_count - self.thresholds["sprint_dependency_count_high"]) * 5.0 + 50.0))
+        elif dep_count > self.thresholds["sprint_dependency_count_moderate"]:
+            components.append((dep_count - self.thresholds["sprint_dependency_count_moderate"]) * 8.0)
 
         if components:
-            return min(100.0, sum(components) / len(components))
+            return min(100.0, max(components))
         return 0.0
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -931,37 +972,10 @@ class RiskEngine:
             return RiskLevel.CRITICAL
 
     def _calculate_velocity_trend(self) -> float:
-        """Calculate velocity trend (negative = degrading)."""
-        if len(self.project_state.actuals) < 2:
-            return 0.0
-
-        # Get last 2 actuals
-        sorted_actuals = sorted(
-            self.project_state.actuals,
-            key=lambda a: a.sprint_number,
-        )
-        if len(sorted_actuals) < 2:
-            return 0.0
-
-        recent = sorted_actuals[-1].actual_effort_hrs
-        previous = sorted_actuals[-2].actual_effort_hrs
-
-        if previous <= 0:
-            return 0.0
-
-        return (recent - previous) / previous
+        """Consume velocity trend from the metrics engine instead of recalculating it."""
+        return float(getattr(self.metrics.velocity_metrics, "velocity_trend_pct", 0.0) or 0.0)
 
     def _calculate_allocation_imbalance(self) -> float:
-        """Calculate variance in team member allocations."""
-        if len(self.project_state.team) <= 1:
-            return 0.0
-
-        allocations = [r.allocation_pct for r in self.project_state.team]
-        mean = sum(allocations) / len(allocations)
-        variance = sum((x - mean) ** 2 for x in allocations) / len(allocations)
-        std_dev = variance ** 0.5
-
-        # Normalize by mean to get coefficient of variation
-        if mean > 0:
-            return std_dev / mean
-        return 0.0
+        """Consume allocation balance from the metrics engine instead of recalculating it."""
+        balance_score = float(getattr(self.metrics.resource_metrics, "workload_balance_score", 1.0) or 1.0)
+        return max(0.0, 1.0 - balance_score)

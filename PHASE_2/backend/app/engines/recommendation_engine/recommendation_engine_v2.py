@@ -3,24 +3,24 @@ from __future__ import annotations
 from typing import List, Optional
 
 from app.domain.models import ProjectState
-from app.engines.recommendations.candidate_generator import CandidateGenerator
-from app.engines.recommendations.impact_estimator import ImpactEstimator
-from app.engines.recommendations.models import (
+from app.engines.recommendation_engine.candidate_generator import CandidateGenerator
+from app.engines.recommendation_engine.impact_estimator import ImpactEstimator
+from app.engines.recommendation_engine.models import (
     Recommendation,
     RecommendationCandidate,
     ScoringWeights,
     SimulationResult,
     UpstreamEngineOutputs,
 )
-from app.engines.recommendations.priority_engine import PriorityEngine
-from app.engines.recommendations.signal_detectors import (
+from app.engines.recommendation_engine.priority_engine import PriorityEngine
+from app.engines.recommendation_engine.signal_detectors import (
     BlockerDetector,
     CapacityDetector,
     CriticalPathDetector,
     ScheduleDetector,
     SprintDetector,
 )
-from app.engines.recommendations.simulation_engine_v2 import EngineRunner, SimulationEngineV2
+from app.engines.simulation_engine import EngineRunner, SimulationEngineV2
 
 
 class RecommendationEngineV2:

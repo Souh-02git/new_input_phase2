@@ -1,6 +1,6 @@
-from app.engines.recommendations.candidate_generator import CandidateGenerator
-from app.engines.recommendations.impact_estimator import ImpactEstimator
-from app.engines.recommendations.models import RecommendationAction, RecommendationCandidate, UpstreamEngineOutputs
+from app.engines.recommendation_engine.candidate_generator import CandidateGenerator
+from app.engines.recommendation_engine.impact_estimator import ImpactEstimator
+from app.engines.recommendation_engine.models import RecommendationAction, RecommendationCandidate, UpstreamEngineOutputs
 from tests.test_candidate_generator import build_upstream
 from tests.test_recommendation_engine import make_recommendation_project_state
 
